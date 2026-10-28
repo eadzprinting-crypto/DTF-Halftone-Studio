@@ -20,6 +20,9 @@ class App:
         self.emb_width = tk.IntVar(value=100); self.stitch_spacing = tk.DoubleVar(value=1.5); self.emb_threshold = tk.IntVar(value=55)
         self.stitch_type = tk.StringVar(value='Fill / Tatami (approx.)'); self.stitch_length = tk.DoubleVar(value=3.0); self.underlay = tk.BooleanVar(value=True); self.thread_palette = ['#202020', '#D62828', '#2474D2', '#F2C230', '#FFFFFF']; self.selected_thread = tk.StringVar(value='#202020'); self.region_mappings = []; self.sampled_rgb = None
         self._build()
+        self._live_preview_job = None
+        self._live_preview_enabled = True
+        self._setup_live_preview()
 
     def _build(self):
         top=ttk.Frame(self.root,padding=8); top.pack(fill='x')
@@ -36,7 +39,7 @@ class App:
         self._scale(dtf,'Contrast (%)',self.contrast,50,200)
         self._scale(dtf,'Minimum ink threshold (%)',self.threshold,0,90)
         ttk.Label(dtf,text='Ink / color mode').pack(anchor='w',pady=(10,3))
-        ttk.Combobox(dtf,textvariable=self.mode,values=['Black','White','Color','Grayscale'],state='readonly').pack(fill='x')
+        mode_box=ttk.Combobox(dtf,textvariable=self.mode,values=['Black','White','Color','Grayscale'],state='readonly'); mode_box.pack(fill='x'); mode_box.bind('<<ComboboxSelected>>', lambda _e: self._schedule_live_preview())
         ttk.Checkbutton(dtf,text='Transparent background',variable=self.transparent).pack(anchor='w',pady=(8,2))
         ttk.Checkbutton(dtf,text='Invert tones',variable=self.invert).pack(anchor='w')
         ttk.Button(dtf,text='Preview Halftone',command=self.preview).pack(fill='x',pady=(10,4))
@@ -48,7 +51,7 @@ class App:
         self._scale(emb,'Stitch row spacing (mm)',self.stitch_spacing,0.4,4.0,fmt=lambda x:f'{x:.1f}')
         self._scale(emb,'Maximum stitch length (mm)',self.stitch_length,1.0,6.0,fmt=lambda x:f'{x:.1f}')
         ttk.Label(emb,text='Stitch type').pack(anchor='w',pady=(8,2))
-        ttk.Combobox(emb,textvariable=self.stitch_type,values=['Running Stitch','Fill / Tatami (approx.)','Satin-like Zigzag (approx.)'],state='readonly').pack(fill='x')
+        stitch_box=ttk.Combobox(emb,textvariable=self.stitch_type,values=['Running Stitch','Fill / Tatami (approx.)','Satin-like Zigzag (approx.)'],state='readonly'); stitch_box.pack(fill='x'); stitch_box.bind('<<ComboboxSelected>>', lambda _e: self._schedule_live_preview())
         self._scale(emb,'Darkness threshold (%)',self.emb_threshold,5,95)
         ttk.Checkbutton(emb,text='Add simple underlay pass (approx.)',variable=self.underlay).pack(anchor='w',pady=5)
         ttk.Button(emb,text='Preview Embroidery',command=self.embroidery_preview).pack(fill='x',pady=(4,3))
@@ -91,6 +94,44 @@ class App:
         self.canvas.bind('<Configure>',self._on_canvas_resize)
         self.status=tk.StringVar(value='Ready'); ttk.Label(self.root,textvariable=self.status,relief='sunken',anchor='w',padding=5).pack(fill='x',side='bottom')
 
+    def _setup_live_preview(self):
+        """Debounced live preview: settings/color changes refresh the embroidery view."""
+        live_vars = [self.emb_width, self.stitch_spacing, self.emb_threshold,
+                     self.stitch_type, self.stitch_length, self.underlay]
+        for var in live_vars:
+            try:
+                var.trace_add('write', lambda *_: self._schedule_live_preview())
+            except Exception:
+                pass
+        self.tabs.bind('<<NotebookTabChanged>>', self._on_tab_changed, add='+')
+
+    def _on_tab_changed(self, _event=None):
+        if self.image is not None and self.tabs.index(self.tabs.select()) == 1:
+            self._schedule_live_preview(delay=50)
+
+    def _schedule_live_preview(self, delay=300):
+        if not getattr(self, '_live_preview_enabled', False) or self.image is None:
+            return
+        if self._live_preview_job is not None:
+            try:
+                self.root.after_cancel(self._live_preview_job)
+            except Exception:
+                pass
+        self._live_preview_job = self.root.after(delay, self._refresh_live_preview)
+
+    def _refresh_live_preview(self):
+        self._live_preview_job = None
+        if self.image is None or self.tabs.index(self.tabs.select()) != 1:
+            return
+        try:
+            current_zoom = self.zoom
+            self._set_preview(self.make_embroidery_preview(), 'embroidery')
+            self.zoom = current_zoom
+            self._render_zoomed()
+            self.status.set('Live embroidery preview updated.')
+        except Exception as e:
+            self.status.set('Live preview error: ' + str(e))
+
     def _refresh_thread_list(self):
         if not hasattr(self,'thread_list'): return
         self.thread_list.delete(0,'end')
@@ -106,6 +147,7 @@ class App:
             self.thread_list.selection_set('end')
             self.thread_list.see('end')
             self.status.set(f'Thread color added: {chosen.upper()}')
+            self._schedule_live_preview()
 
     def edit_thread_color(self):
         sel=self.thread_list.curselection()
@@ -116,6 +158,7 @@ class App:
             self._refresh_thread_list()
             self.thread_list.selection_set(idx)
             self.status.set(f'Thread color updated: {chosen.upper()}')
+            self._schedule_live_preview()
 
     def remove_thread_color(self):
         sel=self.thread_list.curselection()
@@ -124,7 +167,7 @@ class App:
         del self.thread_palette[sel[0]]; self.region_mappings=[m for m in self.region_mappings if m['thread_index']!=sel[0]];
         for m in self.region_mappings:
             if m['thread_index']>sel[0]: m['thread_index']-=1
-        self._refresh_thread_list(); self._refresh_mapping_list()
+        self._refresh_thread_list(); self._refresh_mapping_list(); self._schedule_live_preview()
 
     def enable_sample(self):
         if self.image is None:
@@ -146,16 +189,58 @@ class App:
             self.sample_mode=False; self.status.set('Color sample failed: '+str(e))
 
     def assign_region_thread(self):
-        if self.sampled_rgb is None:
-            messagebox.showinfo('Sample a region','Click Sample from Preview, then click the image to sample a color.'); return
         sel=self.thread_list.curselection()
         if not sel:
             messagebox.showinfo('Select thread','Select a thread color in Thread Color Management first.'); return
-        idx=sel[0]; rgb=self.sampled_rgb; thread=self.thread_palette[idx]
-        # Replace existing mapping for the same sampled source color.
+        idx=sel[0]; thread=self.thread_palette[idx]
+        map_sel=self.mapping_list.curselection() if hasattr(self,'mapping_list') else ()
+        # If a detected region row is selected, change that region directly.
+        if map_sel:
+            m=self.region_mappings[map_sel[0]]
+            m['thread_index']=idx; m['thread']=thread
+            self._refresh_mapping_list(); self.mapping_list.selection_set(map_sel[0])
+            self.status.set(f'Region RGB {m["rgb"]} assigned to thread {thread}.')
+            return
+        if self.sampled_rgb is None:
+            messagebox.showinfo('Select a region','Select a detected region row, or click Sample from Preview and then click the image.'); return
+        rgb=self.sampled_rgb
         self.region_mappings=[m for m in self.region_mappings if m['rgb']!=rgb]
         self.region_mappings.append({'rgb':rgb,'thread_index':idx,'thread':thread})
-        self._refresh_mapping_list(); self.status.set(f'Source RGB {rgb} mapped to thread {thread}.')
+        self._refresh_mapping_list(); self.status.set(f'Source RGB {rgb} mapped to thread {thread}.'); self._schedule_live_preview()
+
+    def _auto_region_mappings(self):
+        """Create editable approximate source-color regions for the imported image."""
+        if self.image is None: return
+        rgba=self.image.convert('RGBA')
+        alpha=rgba.getchannel('A')
+        if alpha.getbbox() is None:
+            self.region_mappings=[]; self._refresh_mapping_list(); return
+        # Quantize only visible pixels so transparent pixels do not become a fake region.
+        rgb=rgba.convert('RGB')
+        try:
+            q=rgb.quantize(colors=min(8,max(2,len(self.thread_palette) or 2)), method=Image.Quantize.MEDIANCUT)
+            colors=q.getpalette() or []
+            qdata=list(q.getdata()); adata=list(alpha.getdata())
+            visible_counts={}
+            for qi, av in zip(qdata, adata):
+                if av >= 24: visible_counts[qi]=visible_counts.get(qi,0)+1
+            counts=sorted(((n,idx) for idx,n in visible_counts.items()), reverse=True)
+            mappings=[]; seen=set()
+            for count, index in counts[:8]:
+                if count < 3: continue
+                base=index*3
+                if base+2 >= len(colors): continue
+                col=tuple(int(v) for v in colors[base:base+3])
+                if col in seen: continue
+                seen.add(col)
+                palette=[tuple(int(hx[i:i+2],16) for i in (1,3,5)) for hx in self.thread_palette]
+                tidx=min(range(len(palette)), key=lambda i:sum((col[k]-palette[i][k])**2 for k in range(3))) if palette else 0
+                mappings.append({'rgb':col,'thread_index':tidx,'thread':self.thread_palette[tidx] if self.thread_palette else '#202020'})
+            self.region_mappings=mappings
+            self._refresh_mapping_list()
+        except Exception:
+            self.region_mappings=[]
+            self._refresh_mapping_list()
 
     def _refresh_mapping_list(self):
         if not hasattr(self,'mapping_list'): return
@@ -167,7 +252,7 @@ class App:
     def remove_region_map(self):
         sel=self.mapping_list.curselection()
         if not sel: return
-        del self.region_mappings[sel[0]]; self._refresh_mapping_list(); self.status.set('Region mapping removed.')
+        del self.region_mappings[sel[0]]; self._refresh_mapping_list(); self.status.set('Region mapping removed.'); self._schedule_live_preview()
 
     def _thread_for_pixel(self, col, palette):
         if self.region_mappings:
@@ -190,8 +275,8 @@ class App:
         if not p:return
         try:
             with Image.open(p) as im:self.image=im.convert('RGBA')
-            self.path=p; self.result=None; self.zoom=1.0; self.filename.configure(text=os.path.basename(p)); self._set_preview(self.image,'image'); self.fit_view()
-            self.status.set(f'Loaded {self.image.width} × {self.image.height}px')
+            self.path=p; self.result=None; self.zoom=1.0; self.filename.configure(text=os.path.basename(p)); self._auto_region_mappings(); self._set_preview(self.image,'image'); self.fit_view()
+            self.status.set(f'Loaded {self.image.width} × {self.image.height}px; approximate color regions detected. Select a region and a thread color to reassign it.')
         except Exception as e:messagebox.showerror('Open failed',str(e))
 
     def make_halftone(self,source):
@@ -265,16 +350,25 @@ class App:
                 nearest_idx=self._thread_for_pixel(col,palette)
                 nearest=palette[nearest_idx]
                 x2=max(1,min(rgba.width-2,x+(-length if reverse else length)))
-                # Do not draw a stitch through transparent gaps.
-                if ap[x2,y] < 24:
-                    x2=x
-                d.line((x,y,x2,min(rgba.height-2,y+max(1,step//2))),fill=nearest+(255,),width=stroke)
+                # Split long row segments at transparent gaps; never bridge holes or letter counters.
+                lo,hi=sorted((x,x2)); run_start=None
+                for xx in range(lo,hi+1):
+                    visible=ap[xx,y] >= 24
+                    if visible and run_start is None: run_start=xx
+                    if (not visible or xx==hi) and run_start is not None:
+                        run_end=xx if visible and xx==hi else xx-1
+                        if run_end-run_start >= 1:
+                            yy=min(rgba.height-2,y+max(1,step//2))
+                            d.line((run_start,y,run_end,yy),fill=nearest+(255,),width=stroke)
+                        run_start=None
         return out
 
     def embroidery_preview(self):
         if self.image is None:messagebox.showinfo('Open image','Please open an image first.');return
-        self.tabs.select(1); self._set_preview(self.make_embroidery_preview(),'embroidery'); self.fit_view()
-        self.status.set('Thread-color embroidery-style preview ready. Visual simulation only; inspect machine file separately.')
+        self.tabs.select(1)
+        self._set_preview(self.make_embroidery_preview(),'embroidery')
+        self.fit_view()
+        self.status.set('Live embroidery-style preview ready. Changes to stitch settings and thread colors update automatically. Machine output still needs validation.')
 
     def build_pattern(self):
         try:
@@ -391,7 +485,7 @@ class App:
     def reset_settings(self):
         self.dot.set(8);self.angle.set(45);self.contrast.set(120);self.threshold.set(5);self.mode.set('Black');self.transparent.set(True);self.invert.set(False);self.status.set('Halftone settings reset.')
     def reset_emb_settings(self):
-        self.emb_width.set(100);self.stitch_spacing.set(1.5);self.emb_threshold.set(55);self.stitch_length.set(3.0);self.stitch_type.set('Fill / Tatami (approx.)');self.underlay.set(True);self.thread_palette=['#202020','#D62828','#2474D2','#F2C230','#FFFFFF'];self._refresh_thread_list();self.status.set('Embroidery settings reset.')
+        self.emb_width.set(100);self.stitch_spacing.set(1.5);self.emb_threshold.set(55);self.stitch_length.set(3.0);self.stitch_type.set('Fill / Tatami (approx.)');self.underlay.set(True);self.thread_palette=['#202020','#D62828','#2474D2','#F2C230','#FFFFFF'];self._refresh_thread_list();self.status.set('Embroidery settings reset.');self._schedule_live_preview()
     def export(self):
         if self.image is None:messagebox.showinfo('Open image','Please open an image first.');return
         default=os.path.splitext(os.path.basename(self.path))[0]+'_DTF_Halftone.png';p=filedialog.asksaveasfilename(title='Export PNG',defaultextension='.png',initialfile=default,filetypes=[('PNG image','*.png')])
