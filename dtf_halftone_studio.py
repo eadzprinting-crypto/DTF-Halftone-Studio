@@ -69,6 +69,7 @@ class App:
         ttk.Button(maprow,text='Assign Thread',command=self.assign_region_thread).pack(side='left',fill='x',expand=True,padx=3)
         ttk.Button(maprow,text='Remove Map',command=self.remove_region_map).pack(side='left',fill='x',expand=True)
         self.sample_mode=False
+        self.canvas.bind('<Button-1>',self._sample_canvas_color)
         ttk.Label(emb,text='DST supports limited color-change records; PES support varies by machine/software. Color-region mapping is approximate; output is algorithmic raster stitching, not professional object-based digitizing.',wraplength=260,foreground='#9a3412').pack(anchor='w',pady=(8,3))
         exportrow=ttk.Frame(emb); exportrow.pack(fill='x',pady=4)
         ttk.Button(exportrow,text='Export DST',command=lambda:self.export_embroidery('dst')).pack(side='left',fill='x',expand=True)
@@ -88,7 +89,6 @@ class App:
         cf.rowconfigure(0,weight=1); cf.columnconfigure(0,weight=1)
         self.canvas.create_text(250,180,text='Open an image to begin',fill='#333',tags='placeholder')
         self.canvas.bind('<Configure>',self._on_canvas_resize)
-        self.canvas.bind('<Button-1>',self._sample_canvas_color)
         self.status=tk.StringVar(value='Ready'); ttk.Label(self.root,textvariable=self.status,relief='sunken',anchor='w',padding=5).pack(fill='x',side='bottom')
 
     def _refresh_thread_list(self):
@@ -98,15 +98,24 @@ class App:
         if self.thread_palette: self.thread_list.selection_set(0)
 
     def add_thread_color(self):
-        chosen=colorchooser.askcolor(title='Choose thread color')[1]
+        chosen=colorchooser.askcolor(parent=self.root, title='Choose thread color')[1]
         if chosen:
-            self.thread_palette.append(chosen); self._refresh_thread_list(); self.status.set(f'Thread color added: {chosen}')
+            self.thread_palette.append(chosen.upper())
+            self._refresh_thread_list()
+            self.thread_list.selection_clear(0, 'end')
+            self.thread_list.selection_set('end')
+            self.thread_list.see('end')
+            self.status.set(f'Thread color added: {chosen.upper()}')
 
     def edit_thread_color(self):
         sel=self.thread_list.curselection()
         if not sel: messagebox.showinfo('Select color','Select a thread color first.'); return
         idx=sel[0]; chosen=colorchooser.askcolor(color=self.thread_palette[idx],title='Edit thread color')[1]
-        if chosen: self.thread_palette[idx]=chosen; self._refresh_thread_list(); self.thread_list.selection_set(idx)
+        if chosen:
+            self.thread_palette[idx]=chosen.upper()
+            self._refresh_thread_list()
+            self.thread_list.selection_set(idx)
+            self.status.set(f'Thread color updated: {chosen.upper()}')
 
     def remove_thread_color(self):
         sel=self.thread_list.curselection()
@@ -217,24 +226,49 @@ class App:
         except Exception as e:messagebox.showerror('Processing failed',str(e))
 
     def make_embroidery_preview(self):
-        if self.image is None:return None
-        im=self.image.copy(); im.thumbnail((850,700),Image.Resampling.LANCZOS); rgba=im.convert('RGBA'); rgb=rgba.convert('RGB')
-        # Approximate thread simulation: quantize pixels to chosen thread palette, then draw short slanted thread strokes.
+        if self.image is None:
+            return None
+        # Preserve source alpha: transparent pixels must not become black stitches.
+        im=self.image.copy()
+        im.thumbnail((850,700),Image.Resampling.LANCZOS)
+        rgba=im.convert('RGBA')
+        rgb=rgba.convert('RGB')
+        alpha=rgba.getchannel('A')
+        has_transparency=alpha.getextrema()[0] < 250
         palette=[]
         for hx in self.thread_palette:
-            try: palette.append(tuple(int(hx[i:i+2],16) for i in (1,3,5)))
-            except Exception: pass
-        if not palette: palette=[(32,32,32)]
-        pix=rgb.load(); out=Image.new('RGBA',rgba.size,(238,232,218,255)); d=ImageDraw.Draw(out)
-        step=max(2,int(self.stitch_spacing.get()*4)); length=max(2,int(self.stitch_length.get()*1.5)); threshold=int(255*self.emb_threshold.get()/100)
+            try:
+                palette.append(tuple(int(hx[i:i+2],16) for i in (1,3,5)))
+            except Exception:
+                pass
+        if not palette:
+            palette=[(32,32,32)]
+        pix=rgb.load()
+        ap=alpha.load()
+        out=Image.new('RGBA',rgba.size,(238,232,218,255))
+        d=ImageDraw.Draw(out)
+        step=max(2,int(float(self.stitch_spacing.get())*4))
+        length=max(2,int(float(self.stitch_length.get())*1.5))
+        # Threshold is used to suppress bright background only for non-transparent photos.
+        threshold=int(255*self.emb_threshold.get()/100)
+        stroke=max(1,min(3,int(float(self.stitch_spacing.get()))))
         for y in range(1,rgba.height-1,step):
             reverse=((y//step)%2)==1
-            for x in (range(1,rgba.width-1,length) if not reverse else range(rgba.width-2,0,-length)):
-                col=pix[x,y]; lum=int(.2126*col[0]+.7152*col[1]+.0722*col[2])
-                if lum>=threshold: continue
-                nearest=palette[self._thread_for_pixel(col,palette)]
+            xs=range(1,rgba.width-1,length) if not reverse else range(rgba.width-2,0,-length)
+            for x in xs:
+                if ap[x,y] < 24:
+                    continue
+                col=pix[x,y]
+                lum=int(.2126*col[0]+.7152*col[1]+.0722*col[2])
+                if not has_transparency and lum >= threshold:
+                    continue
+                nearest_idx=self._thread_for_pixel(col,palette)
+                nearest=palette[nearest_idx]
                 x2=max(1,min(rgba.width-2,x+(-length if reverse else length)))
-                d.line((x,y,x2,min(rgba.height-2,y+max(1,step//2))),fill=nearest+(255,),width=max(1,min(3,int(self.stitch_spacing.get()))))
+                # Do not draw a stitch through transparent gaps.
+                if ap[x2,y] < 24:
+                    x2=x
+                d.line((x,y,x2,min(rgba.height-2,y+max(1,step//2))),fill=nearest+(255,),width=stroke)
         return out
 
     def embroidery_preview(self):
@@ -250,9 +284,13 @@ class App:
         if self.image is None:messagebox.showinfo('Open image','Please open an image first.');return None
         if not self.thread_palette: messagebox.showwarning('No thread colors','Add at least one thread color.'); return None
         # Multi-color raster stitch approximation. This is NOT professional object-based digitizing.
-        src=self.image.copy().convert('RGB'); target_w=max(20,min(250,int(self.emb_width.get())))
-        target_h=max(1,round(target_w*src.height/src.width)); pxw=max(1,int(target_w*2)); pxh=max(1,int(target_h*2))
-        src=src.resize((pxw,pxh),Image.Resampling.LANCZOS); gray=ImageOps.grayscale(src); g=gray.load(); colorpx=src.load(); w,h=gray.size
+        src_rgba=self.image.copy().convert('RGBA')
+        has_transparency=src_rgba.getchannel('A').getextrema()[0] < 250
+        target_w=max(20,min(250,int(self.emb_width.get())))
+        target_h=max(1,round(target_w*src_rgba.height/src_rgba.width)); pxw=max(1,int(target_w*2)); pxh=max(1,int(target_h*2))
+        src_rgba=src_rgba.resize((pxw,pxh),Image.Resampling.LANCZOS)
+        src=src_rgba.convert('RGB'); alpha=src_rgba.getchannel('A')
+        gray=ImageOps.grayscale(src); g=gray.load(); colorpx=src.load(); ap=alpha.load(); w,h=gray.size
         palette=[]
         for hx in self.thread_palette:
             palette.append(tuple(int(hx[i:i+2],16) for i in (1,3,5)))
@@ -266,7 +304,12 @@ class App:
             if yi%2: xs.reverse()
             row=[]
             for x in xs:
-                if g[x,y]>=threshold: continue
+                # Do not create stitches for transparent background pixels.
+                if ap[x,y] < 24:
+                    continue
+                # On opaque photos, use threshold to avoid stitching very light background.
+                if not has_transparency and g[x,y]>=threshold:
+                    continue
                 col=colorpx[x,y]; nearest=self._thread_for_pixel(col,palette)
                 
                 stitch_y=y/2*scale
