@@ -69,7 +69,6 @@ class App:
         ttk.Button(maprow,text='Assign Thread',command=self.assign_region_thread).pack(side='left',fill='x',expand=True,padx=3)
         ttk.Button(maprow,text='Remove Map',command=self.remove_region_map).pack(side='left',fill='x',expand=True)
         self.sample_mode=False
-        self.canvas.bind('<Button-1>',self._sample_canvas_color)
         ttk.Label(emb,text='DST supports limited color-change records; PES support varies by machine/software. Color-region mapping is approximate; output is algorithmic raster stitching, not professional object-based digitizing.',wraplength=260,foreground='#9a3412').pack(anchor='w',pady=(8,3))
         exportrow=ttk.Frame(emb); exportrow.pack(fill='x',pady=4)
         ttk.Button(exportrow,text='Export DST',command=lambda:self.export_embroidery('dst')).pack(side='left',fill='x',expand=True)
@@ -83,6 +82,7 @@ class App:
         self.zoom_label=ttk.Label(tools,text='100%'); self.zoom_label.pack(side='left',padx=10)
         cf=ttk.Frame(view); cf.pack(fill='both',expand=True)
         self.canvas=tk.Canvas(cf,background='#e8e8e8',highlightthickness=0)
+        self.canvas.bind('<Button-1>', self._sample_canvas_color)
         self.hbar=ttk.Scrollbar(cf,orient='horizontal',command=self.canvas.xview); self.vbar=ttk.Scrollbar(cf,orient='vertical',command=self.canvas.yview)
         self.canvas.configure(xscrollcommand=self.hbar.set,yscrollcommand=self.vbar.set)
         self.canvas.grid(row=0,column=0,sticky='nsew'); self.vbar.grid(row=0,column=1,sticky='ns'); self.hbar.grid(row=1,column=0,sticky='ew')
