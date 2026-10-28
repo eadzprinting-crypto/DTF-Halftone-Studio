@@ -311,56 +311,77 @@ class App:
         except Exception as e:messagebox.showerror('Processing failed',str(e))
 
     def make_embroidery_preview(self):
+        """Create a stitch-texture preview over the original image.
+
+        Keep original RGB colors and source alpha; only draw stitch marks over
+        visible foreground pixels. This is a visual simulation, not digitizing.
+        """
         if self.image is None:
             return None
-        # Preserve source alpha: transparent pixels must not become black stitches.
-        im=self.image.copy()
-        im.thumbnail((850,700),Image.Resampling.LANCZOS)
-        rgba=im.convert('RGBA')
-        rgb=rgba.convert('RGB')
-        alpha=rgba.getchannel('A')
-        has_transparency=alpha.getextrema()[0] < 250
-        palette=[]
+        im = self.image.copy()
+        im.thumbnail((850, 700), Image.Resampling.LANCZOS)
+        rgba = im.convert('RGBA')
+        rgb = rgba.convert('RGB')
+        alpha = rgba.getchannel('A')
+        pix = rgb.load()
+        ap = alpha.load()
+        w, h = rgba.size
+
+        palette = []
         for hx in self.thread_palette:
             try:
-                palette.append(tuple(int(hx[i:i+2],16) for i in (1,3,5)))
+                palette.append(tuple(int(hx[i:i+2], 16) for i in (1, 3, 5)))
             except Exception:
                 pass
         if not palette:
-            palette=[(32,32,32)]
-        pix=rgb.load()
-        ap=alpha.load()
-        out=Image.new('RGBA',rgba.size,(238,232,218,255))
-        d=ImageDraw.Draw(out)
-        step=max(2,int(float(self.stitch_spacing.get())*4))
-        length=max(2,int(float(self.stitch_length.get())*1.5))
-        # Threshold is used to suppress bright background only for non-transparent photos.
-        threshold=int(255*self.emb_threshold.get()/100)
-        stroke=max(1,min(3,int(float(self.stitch_spacing.get()))))
-        for y in range(1,rgba.height-1,step):
-            reverse=((y//step)%2)==1
-            xs=range(1,rgba.width-1,length) if not reverse else range(rgba.width-2,0,-length)
+            palette = [(32, 32, 32)]
+
+        # Transparent canvas for stitches only. Composite over the original
+        # RGBA image afterwards so transparent background stays transparent.
+        stitches = Image.new('RGBA', rgba.size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(stitches)
+        step = max(2, int(float(self.stitch_spacing.get()) * 4))
+        length = max(2, int(float(self.stitch_length.get()) * 1.5))
+        stroke = max(1, min(2, int(float(self.stitch_spacing.get()))))
+        threshold = int(255 * self.emb_threshold.get() / 100)
+        has_transparency = alpha.getextrema()[0] < 250
+
+        for y in range(1, h - 1, step):
+            reverse = ((y // step) % 2) == 1
+            xs = range(1, w - 1, length) if not reverse else range(w - 2, 0, -length)
             for x in xs:
-                if ap[x,y] < 24:
+                # Never stitch fully/mostly transparent pixels.
+                if ap[x, y] < 96:
                     continue
-                col=pix[x,y]
-                lum=int(.2126*col[0]+.7152*col[1]+.0722*col[2])
+                col = pix[x, y]
+                lum = int(.2126 * col[0] + .7152 * col[1] + .0722 * col[2])
+                # Threshold only suppresses light pixels on opaque images;
+                # transparent-background artwork is clipped strictly by alpha.
                 if not has_transparency and lum >= threshold:
                     continue
-                nearest_idx=self._thread_for_pixel(col,palette)
-                nearest=palette[nearest_idx]
-                x2=max(1,min(rgba.width-2,x+(-length if reverse else length)))
-                # Split long row segments at transparent gaps; never bridge holes or letter counters.
-                lo,hi=sorted((x,x2)); run_start=None
-                for xx in range(lo,hi+1):
-                    visible=ap[xx,y] >= 24
-                    if visible and run_start is None: run_start=xx
-                    if (not visible or xx==hi) and run_start is not None:
-                        run_end=xx if visible and xx==hi else xx-1
-                        if run_end-run_start >= 1:
-                            yy=min(rgba.height-2,y+max(1,step//2))
-                            d.line((run_start,y,run_end,yy),fill=nearest+(255,),width=stroke)
-                        run_start=None
+                nearest = palette[self._thread_for_pixel(col, palette)]
+                x2 = max(1, min(w - 2, x + (-length if reverse else length)))
+                # Split each stitch into short pieces so it cannot cross clear
+                # transparent gaps or draw outside the foreground silhouette.
+                n = max(1, abs(x2 - x))
+                prev = None
+                for k in range(n + 1):
+                    xx = int(round(x + (x2 - x) * k / n))
+                    yy = int(round(y + (step // 2) * k / n))
+                    yy = max(1, min(h - 2, yy))
+                    if ap[xx, yy] < 96:
+                        prev = None
+                        continue
+                    if prev is not None:
+                        # Blend thread color with the original artwork so its
+                        # color identity remains visible in the preview.
+                        src = pix[xx, yy]
+                        blend = tuple(int(src[c] * 0.62 + nearest[c] * 0.38) for c in range(3))
+                        d.line((prev[0], prev[1], xx, yy), fill=blend + (190,), width=stroke)
+                    prev = (xx, yy)
+
+        # Preserve original colors and alpha; stitches are a subtle overlay.
+        out = Image.alpha_composite(rgba, stitches)
         return out
 
     def embroidery_preview(self):
