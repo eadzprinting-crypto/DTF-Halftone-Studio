@@ -69,7 +69,6 @@ class App:
         ttk.Button(maprow,text='Assign Thread',command=self.assign_region_thread).pack(side='left',fill='x',expand=True,padx=3)
         ttk.Button(maprow,text='Remove Map',command=self.remove_region_map).pack(side='left',fill='x',expand=True)
         self.sample_mode=False
-        self.canvas.bind('<Button-1>',self._sample_canvas_color)
         ttk.Label(emb,text='DST supports limited color-change records; PES support varies by machine/software. Color-region mapping is approximate; output is algorithmic raster stitching, not professional object-based digitizing.',wraplength=260,foreground='#9a3412').pack(anchor='w',pady=(8,3))
         exportrow=ttk.Frame(emb); exportrow.pack(fill='x',pady=4)
         ttk.Button(exportrow,text='Export DST',command=lambda:self.export_embroidery('dst')).pack(side='left',fill='x',expand=True)
@@ -89,6 +88,7 @@ class App:
         cf.rowconfigure(0,weight=1); cf.columnconfigure(0,weight=1)
         self.canvas.create_text(250,180,text='Open an image to begin',fill='#333',tags='placeholder')
         self.canvas.bind('<Configure>',self._on_canvas_resize)
+        self.canvas.bind('<Button-1>',self._sample_canvas_color)
         self.status=tk.StringVar(value='Ready'); ttk.Label(self.root,textvariable=self.status,relief='sunken',anchor='w',padding=5).pack(fill='x',side='bottom')
 
     def _refresh_thread_list(self):
